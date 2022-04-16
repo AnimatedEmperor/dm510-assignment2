@@ -1,0 +1,176 @@
+/* Prototype module for second mandatory DM510 assignment */
+#ifndef __KERNEL__
+#  define __KERNEL__
+#endif
+#ifndef MODULE
+#  define MODULE
+#endif
+
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/slab.h>	
+#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/errno.h>
+#include <linux/types.h>
+#include <linux/wait.h>
+/* #include <asm/uaccess.h> */
+#include <linux/uaccess.h>
+#include <linux/semaphore.h>
+/* #include <asm/system.h> */
+#include <asm/switch_to.h>
+/* Prototypes - this would normally go in a .h file */
+static int dm510_open( struct inode*, struct file* );
+static int dm510_release( struct inode*, struct file* );
+static ssize_t dm510_read( struct file*, char*, size_t, loff_t* );
+static ssize_t dm510_write( struct file*, const char*, size_t, loff_t* );
+long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+
+typedef struct pseudo_device {
+  dev_t dev;
+  int major;
+  int open;
+} pseudo_device;
+
+//Declaring a struct named pdevice of type pseudo_device
+pseudo_device pdevice;
+
+//Open is initialized to false meaning nothing is opened yet
+pdevice.open=0;		
+
+#define DEVICE_NAME "dm510_dev" /* Dev name as it appears in /proc/devices */
+#define MAJOR_NUMBER 255
+#define MIN_MINOR_NUMBER 0
+#define MAX_MINOR_NUMBER 1
+
+#define DEVICE_COUNT 2
+/* end of what really should have been in a .h file */
+
+/* file operations struct */
+static struct file_operations dm510_fops = {
+	.owner   = THIS_MODULE,
+	.read    = dm510_read,
+	.write   = dm510_write,
+	.open    = dm510_open,
+	.release = dm510_release,
+        .unlocked_ioctl   = dm510_ioctl
+};
+
+/* called when module is loaded */
+int dm510_init_module( void ) {
+
+  pdevice.major = register_chrdev_region(0, DEVICE_NAME, &Fops); 	//(JONAS): Do you mean register_chrdev_region?
+  if(pdevice.major < 0) {
+    	printk(KERN_WARNING DEVICE_NAME ": cannot assign major\n");
+    	return pdevice.major;
+  }
+	printk(KERN_INFO "DM510: Hello from your device!\n");
+	return 0;
+}
+
+/* Called when module is unloaded */
+void dm510_cleanup_module( void ) {
+
+	/* clean up code belongs here */
+
+	printk(KERN_INFO "DM510: Module unloaded.\n");
+}
+
+
+/* Called when a process tries to open the device file */
+static int dm510_open( struct inode *inode, struct file *filp ) {
+if(pdevice.open) {		//(JONAS): This is techanlly not safe, since two process might simultaneously get past the if-statement and then both acess the device.
+    printk(KERN_INFO DEVICE_NAME ": device busy\n");
+    return -EBUSY;
+  }
+  pdevice.open = 1;
+  printk(KERN_INFO DEVICE_NAME ": allocating buffer...\n");
+  filp->private_data = (char *)kmalloc(BUFFER_SIZE, GFP_KERNEL); //Gets mem_space accordingly //(JONAS): filp is local to the process who have open the device. If multiple process open the devices then your code gives them their own buffer.
+  if(!filp->private_data) {
+    printk(KERN_INFO DEVICE_NAME ": allocation failed\n");
+    return -ENOMEM;
+  }
+  strcpy(filp->private_data, "DEFAULT STRING");
+  printk(KERN_INFO DEVICE_NAME ": allocation succeeded\n");
+  return 0;
+}
+
+
+/* Called when a process closes the device file. */
+static int dm510_release( struct inode *inode, struct file *filp ) {
+  kfree(filp->private_data);
+  printk(KERN_INFO DEVICE_NAME ": closed\n");
+  pdevice.open = 0;
+  return 0;
+}
+
+
+/* Called when a process, which already opened the dev file, attempts to read from it. */
+static ssize_t dm510_read( struct file *filp,
+    char *buf,      /* The buffer to fill with data     */
+    size_t count,   /* The max number of bytes to read  */
+    loff_t *f_pos )  /* The offset in the file           */
+{
+ if(count > BUFFER_SIZE)
+    count = BUFFER_SIZE;
+  else if(count < 0)
+    return 0;
+  
+  if(copy_to_user(buffer, filp->private_data, count)) {
+    printk(KERN_INFO DEVICE_NAME ": read failed\n");
+    return -EFAULT;
+  }
+  printk(KERN_INFO DEVICE_NAME ": read %s, %d bytes\n", buffer, (int)count);
+  return count;
+}
+
+
+/* Called when a process writes to dev file */
+static ssize_t dm510_write( struct file *filp,
+const char *buf,/* The buffer to get data from      */
+    size_t count,   /* The max number of bytes to write */
+    loff_t *f_pos )  /* The offset in the file           */
+{
+if(count > BUFFER_SIZE)
+    count = BUFFER_SIZE;
+  else if(count < 0)
+    return 0;
+  if(copy_from_user(filp->private_data, buffer, count)) {
+    printk(KERN_INFO DEVICE_NAME ": write failed\n");
+    return -EFAULT;
+  }
+  printk(KERN_INFO DEVICE_NAME ": write %s, %d bytes\n", (char *)(filp->private_data), (int)count);
+  return count;
+}
+
+
+/* called by system call icotl */ 
+long dm510_ioctl( 
+    struct file *filp, 
+    unsigned int i,   /* command passed from the user */
+    unsigned long arg ) /* argument of the command */
+{
+	if(i == PDD_READ) {
+    if(param->index >= BUFFER_SIZE) {									//(JONAS): What the hell is param. You can't just reference something that have not been created.
+      printk(KERN_INFO DEVICE_NAME ": ioctl buffer index %u > %d\n", param->index, BUFFER_SIZE - 1);
+      return -EFAULT;
+    }
+    printk(KERN_INFO DEVICE_NAME ": ioctl read byte %d\n", param->index);
+    return ((char *)(filp->private_data))[param->index];
+  } else if(i == PDD_WRITE) {
+    if(param->index >= BUFFER_SIZE) {
+      printk(KERN_INFO DEVICE_NAME ": ioctl buffer index %u > %d\n", param->index, BUFFER_SIZE - 1);
+      return -EFAULT;
+    }
+    printk(KERN_INFO DEVICE_NAME ": ioctl write %c at %d\n", param->c, param->index);
+    ((char *)(filp->private_data))[param->index] = param->c;
+  }
+  return 0;
+}
+}
+
+module_init( dm510_init_module );
+module_exit( dm510_cleanup_module );
+
+MODULE_AUTHOR( "...Mohammed KM Khalafalla" );
+MODULE_LICENSE( "GPL" );
